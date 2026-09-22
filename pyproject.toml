@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tok_n_compress"
+version = "1.0.0"
+description = "Hybrid Memory Model conversation compression skill for handling long LLM contexts."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+tok-compress = "tok_n_compress.cli:main"
+tok-mcp = "tok_n_compress.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tok_n_compress*"]

@@ -1,0 +1,11 @@
+# Core dependencies
+sqlalchemy>=2.0.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# LLM integration (placeholder - replace with actual provider)
+# e.g., transformers, litellm, or your preferred LLM SDK
+
+# Testing and utilities
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
