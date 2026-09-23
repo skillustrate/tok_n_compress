@@ -2,7 +2,7 @@
 ### `tok_n_compress` — The Cognitive Memory Architecture for Coding Agents
 
 [![Tests](https://img.shields.io/badge/pytest-36%20passed-brightgreen.svg)]()
-[![Evals](https://img.shields.io/badge/evals-5%2F5%20passed-brightgreen.svg)]()
+[![Evals](https://img.shields.io/badge/evals-6%2F6%20passed-brightgreen.svg)]()
 [![MCP](https://img.shields.io/badge/MCP-2024--11--05%20compliant-blueviolet.svg)]()
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)]()
@@ -265,7 +265,7 @@ pytest -v
 
 ---
 
-### 2. 5-Stage Production Evaluation Benchmark
+### 2. 6-Stage Production Evaluation Benchmark
 
 Run the automated quantitative evaluation suite to measure latency, compression ratios, and retrieval recall:
 
@@ -282,10 +282,11 @@ python3 tok_n_compress/evals/run.py
 | Benchmark Stage | Metrics Evaluated | Production Result | Status |
 | :--- | :--- | :--- | :---: |
 | **Stage 1: Needle-in-a-Haystack** | Recall@3, Hit Rank, Rehydration Content Fidelity | **100% Recall@3** (All 4 needles found at **Rank 1**, 2.8ms–4.1ms latency, **84.19x** ratio, **18,196 tokens saved**) | **PASS** |
-| **Stage 2: Ultra-Long 210K+ Tokens** | Compression Ratio, Token Reduction %, Throughput | **974.49x ratio**, **98.82% token reduction** (Saved **208,410 tokens** in **571.9ms**, active window reduced from 190 to 3 turns) | **PASS** |
+| **Stage 2: Ultra-Long 210K+ Tokens** | Compression Ratio, Token Reduction %, Throughput | **974.49x ratio**, **98.82% token reduction** (Saved **208,410 tokens** in **569.6ms**, active window reduced from 190 to 3 turns) | **PASS** |
 | **Stage 3: Summary Faithfulness** | Precision, Recall, F1 Score, Entity Retention | **0.93 Precision**, **0.97 Recall**, **0.95 F1**, **100% Entity Retention** (`db_replica.yaml`, `max_overflow: 20`) | **PASS** |
 | **Stage 4: Topic-Shift Detection** | Thematic Continuity vs. Domain Boundary Detection | **0% False Positives** on continuous topics, **100% True Positives** on domain shifts | **PASS** |
 | **Stage 5: SQLite Atomic Integrity** | Multi-level Lineage Traversal, Cascade Deletions | Lineage `[3, 4, 5]` verified; zero orphaned segments on cascade delete | **PASS** |
+| **Stage 6: SQLite Vector & Hybrid RRF** | Vector Cosine Distance, Top-1 Hit Rate, Query Latency | **100% Top-1 Accuracy** across diverse technical domains, **11.49ms** average query latency inside SQLite | **PASS** |
 
 ---
 
