@@ -270,11 +270,14 @@ pytest -v
 Run the automated quantitative evaluation suite to measure latency, compression ratios, and retrieval recall:
 
 ```bash
-# In Podman dev container:
+# Run the complete 6-stage evaluation:
 podman exec dev-box /usr/local/bin/python tok_n_compress/evals/run.py
 
-# Or locally:
-python3 tok_n_compress/evals/run.py
+# Run dedicated SQLite Vector DB benchmark (latency, throughput, cosine calibration):
+podman exec dev-box /usr/local/bin/python tok_n_compress/evals/eval_vector_db.py
+
+# Run dedicated 12-Point Architectural Blueprint audit:
+podman exec dev-box /usr/local/bin/python tok_n_compress/evals/eval_blueprint_12.py
 ```
 
 #### Production Efficiency Benchmark Results
