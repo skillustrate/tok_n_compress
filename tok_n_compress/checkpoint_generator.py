@@ -1,8 +1,8 @@
 """
-Checkpoint Generation Module for Hybrid Memory Model.
+Checkpoint Generation Module for AHMS (Agentic Hybrid Memory System).
 
 Connects the summarization engine to the database and creates Checkpoint objects with hierarchy.
-Ensures atomic persistence of both the checkpoint and raw conversation segments.
+Ensures atomic persistence of the checkpoint, raw conversation segments, and vector embeddings.
 """
 
 from datetime import datetime, timezone
@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional, List, Set
 
 from .database import DatabaseManager, get_database_manager
 from .summarizer import SummarizationEngine, get_summarizer
+from .embeddings import get_embedding_engine
 
 
 class CheckpointGenerator:
@@ -22,20 +23,26 @@ class CheckpointGenerator:
     ):
         self.db = db_manager or get_database_manager()
         self.summarizer = summarizer or get_summarizer()
+        self.embedder = get_embedding_engine()
 
     def generate_checkpoint(
         self,
         segment_content: str,
         timestamp: Optional[str] = None,
-        parent_id: Optional[int] = None
+        parent_id: Optional[int] = None,
+        is_pinned: bool = False,
+        embedding: Optional[List[float]] = None
     ) -> Dict[str, Any]:
         """
-        Generate a checkpoint from a raw conversation segment and persist it atomically.
+        Generate a checkpoint from a raw conversation segment and persist it atomically
+        along with its vector embedding and metadata.
 
         Args:
             segment_content: The full text of the conversation segment to compress.
             timestamp: ISO format timestamp (defaults to current UTC time).
             parent_id: ID of the previous checkpoint in the conversation hierarchy.
+            is_pinned: Whether this checkpoint and segment are protected with pin status.
+            embedding: Precomputed embedding vector or None (computed automatically).
 
         Returns:
             Dictionary containing the checkpoint reference data and database IDs.
@@ -52,17 +59,23 @@ class CheckpointGenerator:
         # Step 1: Summarize the segment
         summary_data = self.summarizer.summarize_segment(segment_content)
 
-        # Step 2: Save raw segment and checkpoint atomically in SQLite
+        # Step 2: Generate embedding if not supplied
+        if embedding is None:
+            embedding = self.embedder.embed_text(segment_content)
+
+        # Step 3: Save raw segment, embedding, and checkpoint atomically in SQLite
         checkpoint_id, raw_segment_id = self.db.save_checkpoint_atomic(
             parent_id=parent_id,
             timestamp=timestamp,
             summary=summary_data["summary"],
             files_metadata=summary_data["files_metadata"],
             key_prompts=summary_data["key_prompts"],
-            raw_segment_content=segment_content
+            raw_segment_content=segment_content,
+            embedding=embedding,
+            is_pinned=is_pinned
         )
 
-        # Step 3: Build checkpoint reference object for active context
+        # Step 4: Build checkpoint reference object for active context
         checkpoint_ref = {
             "id": checkpoint_id,
             "parent_checkpoint_id": parent_id,
@@ -70,7 +83,8 @@ class CheckpointGenerator:
             "summary": summary_data["summary"],
             "files_metadata": summary_data["files_metadata"],
             "key_prompts": summary_data["key_prompts"],
-            "raw_segment_refs": [raw_segment_id]
+            "raw_segment_refs": [raw_segment_id],
+            "is_pinned": is_pinned
         }
 
         return checkpoint_ref

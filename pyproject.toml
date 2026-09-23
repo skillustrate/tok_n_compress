@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tok_n_compress"
-version = "1.0.0"
-description = "Hybrid Memory Model conversation compression skill for handling long LLM contexts."
+version = "2.0.0"
+description = "Agentic Hybrid Memory System (AHMS) for long-context LLMs and MCP-compatible coding agents."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [

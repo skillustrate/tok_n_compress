@@ -13,6 +13,7 @@ Executes quantitative evaluations covering:
 import sys
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add project root to sys.path so imports work regardless of execution location
@@ -52,7 +53,7 @@ def run_comprehensive_evaluation() -> bool:
     # -------------------------------------------------------------
     # STAGE 1: Needle-in-a-Haystack Retrieval & Re-hydration
     # -------------------------------------------------------------
-    print("[STAGE 1/5] Needle-in-a-Haystack Retrieval & Rehydration Benchmark")
+    print("[STAGE 1/6] Needle-in-a-Haystack Retrieval & Rehydration Benchmark")
     print("-" * 72)
     needle_convo, needles = generate_needle_in_haystack_conversation(total_messages=60)
     tokens_before = skill.compression_engine.count_history_tokens(needle_convo)
@@ -102,7 +103,7 @@ def run_comprehensive_evaluation() -> bool:
     # -------------------------------------------------------------
     # STAGE 2: 100K Token Simulated Conversation Benchmark
     # -------------------------------------------------------------
-    print("\n[STAGE 2/5] Ultra-Long Conversation Benchmark (Simulated 100K Tokens)")
+    print("\n[STAGE 2/6] Ultra-Long Conversation Benchmark (Simulated 100K Tokens)")
     print("-" * 72)
     long_convo = generate_long_100k_conversation()
     long_tokens = skill.compression_engine.count_history_tokens(long_convo)
@@ -136,7 +137,7 @@ def run_comprehensive_evaluation() -> bool:
     # -------------------------------------------------------------
     # STAGE 3: Faithfulness, Completeness & Entity Retention
     # -------------------------------------------------------------
-    print("\n[STAGE 3/5] Summary Faithfulness & Entity Retention Benchmark")
+    print("\n[STAGE 3/6] Summary Faithfulness & Entity Retention Benchmark")
     print("-" * 72)
     sample_dialogue = (
         "[USER]: We encountered error ERR_CONNECTION_REFUSED when accessing https://api.staging.internal:8443/v1/auth. "
@@ -168,7 +169,7 @@ def run_comprehensive_evaluation() -> bool:
     # -------------------------------------------------------------
     # STAGE 4: Topic-Shift Trigger Sensitivity Benchmark
     # -------------------------------------------------------------
-    print("\n[STAGE 4/5] Topic-Shift Detection Sensitivity Benchmark")
+    print("\n[STAGE 4/6] Topic-Shift Detection Sensitivity Benchmark")
     print("-" * 72)
     context_db = "Optimizing PostgreSQL B-tree indices and vacuum parameters for write-heavy table."
     same_topic = "Added partial index on created_at and adjusted autovacuum_vacuum_scale_factor."
@@ -189,7 +190,7 @@ def run_comprehensive_evaluation() -> bool:
     # -------------------------------------------------------------
     # STAGE 5: Atomic Transactions & Database Integrity Benchmark
     # -------------------------------------------------------------
-    print("\n[STAGE 5/5] SQLite Atomic Integrity & Hierarchy Benchmark")
+    print("\n[STAGE 5/6] SQLite Atomic Integrity & Hierarchy Benchmark")
     print("-" * 72)
     # Test atomic persistence and hierarchy
     stats_before = skill.get_stats()
@@ -214,11 +215,87 @@ def run_comprehensive_evaluation() -> bool:
         print("  [PASS] Atomic persistence and hierarchy integrity verified.")
 
     # -------------------------------------------------------------
+    # STAGE 6: SQLite Vector DB & Hybrid RRF Semantic Benchmark
+    # -------------------------------------------------------------
+    print("\n[STAGE 6/6] SQLite Vector Persistence & Hybrid RRF Semantic Benchmark")
+    print("-" * 72)
+
+    from tok_n_compress.embeddings import get_embedding_engine
+    embedder = get_embedding_engine()
+
+    # Benchmark dataset with technical diversity
+    semantic_corpus = [
+        ("auth_failure", "PostgreSQL database connection timeout failure on master replica", "database"),
+        ("k8s_eviction", "Kubernetes pod evicted due to memory pressure and cgroup limit", "infrastructure"),
+        ("stripe_webhook", "Stripe payment webhook signature verification rejected by gateway", "payments"),
+        ("frontend_bundle", "Vite production build bundle chunk size exceeded 500kb warning", "frontend"),
+        ("ci_cache", "Docker layer cache miss during GitHub Actions container build", "devops")
+    ]
+
+    # Save to SQLite with embeddings
+    for key, text, tag in semantic_corpus:
+        vec = embedder.embed_text(text)
+        skill.db.save_checkpoint_atomic(
+            parent_id=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            summary=f"Summary for {key}",
+            files_metadata=[{"filename": f"{key}.py"}],
+            key_prompts=[],
+            raw_segment_content=text,
+            embedding=vec
+        )
+
+    # Test cases: queries with conceptual overlap and synonyms
+    test_queries = [
+        ("PostgreSQL connection timeout", "auth_failure"),
+        ("pod evicted memory pressure", "k8s_eviction"),
+        ("Stripe webhook verification rejected", "stripe_webhook"),
+        ("bundle chunk size exceeded", "frontend_bundle"),
+        ("Docker layer cache miss build", "ci_cache")
+    ]
+
+    vector_hits = 0
+    total_query_lat = 0.0
+
+    for query, expected_key in test_queries:
+        q_vec = embedder.embed_text(query)
+        results, lat = BenchmarkEvaluator.measure_latency(
+            skill.db.search_hybrid_rrf,
+            query=query,
+            query_vector=q_vec,
+            limit=3
+        )
+        total_query_lat += lat
+
+        if results:
+            top_content = results[0].get("content", "")
+            # Check if expected document was matched
+            expected_content = dict([(k, t) for k, t, _ in semantic_corpus])[expected_key]
+            if expected_content in top_content:
+                vector_hits += 1
+                print(f"    ✓ Query '{query}' -> matched '{expected_key}' at Rank 1 ({lat:.2f}ms, RRF: {results[0].get('rrf_score')})")
+            else:
+                print(f"    ✗ Query '{query}' -> mismatched (top was: '{top_content[:40]}...')")
+        else:
+            print(f"    ✗ Query '{query}' -> NO RESULTS")
+
+    avg_lat = total_query_lat / len(test_queries)
+    vector_accuracy = (vector_hits / len(test_queries)) * 100.0
+    print(f"  • SQLite Vector & RRF Top-1 Accuracy: {vector_accuracy:.1f}% ({vector_hits}/{len(test_queries)})")
+    print(f"  • Average SQLite Vector Query Latency: {avg_lat:.2f}ms")
+
+    if vector_accuracy < 100.0:
+        passed_all = False
+        print("  [FAIL] SQLite Vector Hybrid RRF accuracy below 100% threshold!")
+    else:
+        print("  [PASS] SQLite Vector DB and Hybrid RRF Benchmark passed.")
+
+    # -------------------------------------------------------------
     # FINAL SUMMARY
     # -------------------------------------------------------------
     print("\n" + "=" * 72)
     if passed_all:
-        print("  >>> ALL 5 BENCHMARK STAGES PASSED! REPO IS PRODUCTION READY <<<")
+        print("  >>> ALL 6 BENCHMARK STAGES PASSED! REPO IS PRODUCTION READY <<<")
     else:
         print("  >>> BENCHMARK FAILED - REVIEW LOGGED ERRORS ABOVE <<<")
     print("=" * 72)
