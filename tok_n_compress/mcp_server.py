@@ -1,5 +1,5 @@
 """
-Model Context Protocol (MCP) Server for tok_n_compress.
+Model Context Protocol (MCP) Server for tok_n_compress v2.0 (AHMS).
 
 Enables seamless zero-config tool integration across all MCP-compatible agent harnesses:
 - Claude Code (`claude mcp add tok-compress ...`)
@@ -28,7 +28,8 @@ class MCPServer:
                 "name": "compress_conversation",
                 "description": (
                     "Compress a list of conversation messages into a persistent SQLite checkpoint snapshot. "
-                    "Replaces older dialogue turns with a structured summary while keeping recent turns in active context."
+                    "Replaces older dialogue turns with a structured summary while keeping recent turns in active context. "
+                    "Respects pinned turns and snaps to clean turn boundaries."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -55,19 +56,24 @@ class MCPServer:
                 "name": "query_memory",
                 "description": (
                     "Search compressed long-term memory for relevant past conversation segments, "
-                    "error codes, decisions, or files mentioned earlier."
+                    "error codes, decisions, or files mentioned earlier using Hybrid RRF (FTS5 + Vector Cosine)."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Search keyword, technical term, or question to find in past conversations."
+                            "description": "Search keyword, technical term, or casual question to find in past conversations."
                         },
                         "limit": {
                             "type": "integer",
                             "description": "Maximum number of relevant segments to retrieve (default: 3).",
                             "default": 3
+                        },
+                        "use_hybrid": {
+                            "type": "boolean",
+                            "description": "Whether to use Hybrid RRF search (default: true).",
+                            "default": True
                         }
                     },
                     "required": ["query"]
@@ -77,7 +83,7 @@ class MCPServer:
                 "name": "rehydrate_segment",
                 "description": (
                     "Rehydrate a raw conversation segment from long-term memory into active context. "
-                    "Formats the historical dialogue block with context boundaries for prompt injection."
+                    "Wraps historical dialogue in structured XML envelopes (<retrieved_context>) for clean injection."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -89,6 +95,48 @@ class MCPServer:
                         "user_query": {
                             "type": "string",
                             "description": "The user's current question to format the rehydration context around."
+                        },
+                        "format_style": {
+                            "type": "string",
+                            "enum": ["xml", "legacy"],
+                            "description": "Formatting style for prompt injection ('xml' or 'legacy', default: 'xml').",
+                            "default": "xml"
+                        }
+                    },
+                    "required": ["segment_id"]
+                }
+            },
+            {
+                "name": "get_checkpoint_map",
+                "description": (
+                    "Retrieve the high-level Layer 2 episodic summary map of the conversation. "
+                    "Returns a lightweight overview of all checkpoints, timestamps, and files modified."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of checkpoints to include in the map (default: 50).",
+                            "default": 50
+                        }
+                    }
+                }
+            },
+            {
+                "name": "pin_segment",
+                "description": "Pin or unpin a historical segment to protect it from automated eviction.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "segment_id": {
+                            "type": "integer",
+                            "description": "The ID of the segment to pin or unpin."
+                        },
+                        "pinned": {
+                            "type": "boolean",
+                            "description": "True to pin (protect), False to unpin.",
+                            "default": True
                         }
                     },
                     "required": ["segment_id"]
@@ -96,7 +144,7 @@ class MCPServer:
             },
             {
                 "name": "get_memory_stats",
-                "description": "Get storage statistics for the conversation database (total checkpoints, segments, and thresholds).",
+                "description": "Get storage statistics, model context window, and dynamic budgeting metrics.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -115,10 +163,13 @@ class MCPServer:
                 "id": msg_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
+                    "capabilities": {
+                        "tools": {},
+                        "resources": {}
+                    },
                     "serverInfo": {
                         "name": "tok_n_compress",
-                        "version": "1.0.0"
+                        "version": "2.0.0"
                     }
                 }
             }
@@ -158,6 +209,46 @@ class MCPServer:
                     }
                 }
 
+        elif method == "resources/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "resources": [
+                        {
+                            "uri": "memory://checkpoint-map",
+                            "name": "Episodic Checkpoint Map",
+                            "mimeType": "application/json",
+                            "description": "Hierarchical summary tree of active conversation checkpoints."
+                        }
+                    ]
+                }
+            }
+
+        elif method == "resources/read":
+            uri = params.get("uri")
+            if uri == "memory://checkpoint-map":
+                map_data = self.skill.get_checkpoint_map()
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "contents": [
+                            {
+                                "uri": uri,
+                                "mimeType": "application/json",
+                                "text": json.dumps(map_data, indent=2)
+                            }
+                        ]
+                    }
+                }
+            else:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32602, "message": f"Unknown resource URI: {uri}"}
+                }
+
         else:
             return {
                 "jsonrpc": "2.0",
@@ -180,16 +271,29 @@ class MCPServer:
         elif name == "query_memory":
             matches = self.skill.query(
                 query_text=args.get("query", ""),
-                limit=args.get("limit", 3)
+                limit=args.get("limit", 3),
+                use_hybrid=args.get("use_hybrid", True)
             )
             return json.dumps(matches, indent=2)
 
         elif name == "rehydrate_segment":
             formatted = self.skill.rehydrate(
                 target=args.get("segment_id"),
-                user_query=args.get("user_query")
+                user_query=args.get("user_query"),
+                format_style=args.get("format_style", "xml")
             )
             return formatted
+
+        elif name == "get_checkpoint_map":
+            chk_map = self.skill.get_checkpoint_map(limit=args.get("limit", 50))
+            return json.dumps(chk_map, indent=2)
+
+        elif name == "pin_segment":
+            ok = self.skill.pin_segment(
+                segment_id=args.get("segment_id"),
+                pinned=args.get("pinned", True)
+            )
+            return json.dumps({"segment_id": args.get("segment_id"), "pinned": args.get("pinned", True), "success": ok})
 
         elif name == "get_memory_stats":
             stats = self.skill.get_stats()

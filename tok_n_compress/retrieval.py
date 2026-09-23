@@ -1,52 +1,124 @@
 """
-Retrieval Layer for Hybrid Memory Model.
+Retrieval Layer for AHMS (Agentic Hybrid Memory System).
 
-Enables search and "re-hydration" of compressed details from deep memory into the active context window.
+Features:
+- Query Expansion for ambiguous, casual, or pronoun-heavy user queries.
+- Hybrid Search combining SQLite FTS5 (Keyword) and vector similarity via Reciprocal Rank Fusion (RRF).
+- Structured XML-enveloped Context Re-hydration (<retrieved_context>...</retrieved_context>).
 """
 
 import re
 from typing import Dict, List, Any, Optional
 
 from .database import DatabaseManager, get_database_manager
+from .embeddings import get_embedding_engine, FastLocalEmbedding
 
 
 class RetrievalEngine:
-    """Handles retrieval and re-hydration of compressed conversation segments."""
+    """Handles query expansion, hybrid RRF search, and XML context re-hydration."""
 
-    def __init__(self, db_manager: Optional[DatabaseManager] = None):
+    # Common technical synonym expansions
+    SYNONYM_MAP = {
+        "error": ["error", "exception", "failure", "traceback", "failed", "crash"],
+        "bug": ["bug", "defect", "issue", "failure", "fix"],
+        "timeout": ["timeout", "timed out", "deadline", "connection timeout"],
+        "auth": ["auth", "authentication", "login", "token", "jwt", "credentials"],
+        "db": ["db", "database", "sqlite", "query", "schema", "table"],
+        "test": ["test", "pytest", "assertion", "mock", "unit test"],
+        "deploy": ["deploy", "deployment", "docker", "podman", "container"],
+        "api": ["api", "endpoint", "route", "http", "request", "response"]
+    }
+
+    def __init__(
+        self,
+        db_manager: Optional[DatabaseManager] = None,
+        embedder: Optional[FastLocalEmbedding] = None
+    ):
         self.db = db_manager or get_database_manager()
+        self.embedder = embedder or get_embedding_engine()
+
+    def expand_query(self, query: str, recent_context: Optional[str] = None) -> str:
+        """
+        Expand casual or vague queries into richer technical terms using synonym mapping
+        and recent contextual signals.
+        """
+        trimmed = query.strip()
+        if not trimmed:
+            return ""
+
+        words = re.findall(r"\b[a-zA-Z0-9_\-\./#]+\b", trimmed.lower())
+        expanded_terms = list(words)
+
+        for w in words:
+            if w in self.SYNONYM_MAP:
+                expanded_terms.extend(self.SYNONYM_MAP[w])
+
+        # If query is very short or vague (e.g. "that error"), pull technical clues from recent context
+        if len(words) <= 3 and recent_context:
+            context_words = re.findall(r"\b[a-zA-Z0-9_\-\./#]{4,}\b", recent_context.lower())
+            # Pick up to 3 distinctive technical terms from context
+            for cw in context_words[:10]:
+                if cw not in expanded_terms:
+                    expanded_terms.append(cw)
+                    if len(expanded_terms) >= 8:
+                        break
+
+        # Remove duplicates while preserving order
+        seen = set()
+        deduped = []
+        for term in expanded_terms:
+            if term not in seen:
+                seen.add(term)
+                deduped.append(term)
+
+        return " ".join(deduped)
 
     def query_memory(
         self,
         query: str,
-        limit: int = 5
+        limit: int = 5,
+        use_hybrid: bool = True,
+        expand_vague_query: bool = True
     ) -> List[Dict[str, Any]]:
         """
-        Search compressed memory for relevant segments matching user query.
-        Uses a hybrid strategy: raw segment search with fallback/enrichment from checkpoint metadata.
+        Search compressed memory using Hybrid RRF (FTS5 + Vector Cosine).
 
         Args:
-            query: The user's query or search terms.
+            query: The user's search query or conversational question.
             limit: Maximum number of results to return.
+            use_hybrid: If True, uses Hybrid Reciprocal Rank Fusion; otherwise keyword search.
+            expand_vague_query: If True, automatically expands short or vague queries.
 
         Returns:
-            List of matching segments with metadata and relevance scores.
+            Ranked list of matching segments with relevance scores and metadata.
         """
         trimmed_query = query.strip()
         if not trimmed_query:
             return []
 
-        query_terms = [t.lower() for t in re.findall(r"\b\w+\b", trimmed_query) if len(t) > 1]
+        search_query = self.expand_query(trimmed_query) if expand_vague_query else trimmed_query
 
+        if use_hybrid:
+            q_vec = self.embedder.embed_text(search_query)
+            hybrid_results = self.db.search_hybrid_rrf(search_query, query_vector=q_vec, limit=limit)
+            if hybrid_results:
+                return hybrid_results
+
+        # Fallback / Enrichment via Checkpoints metadata if needed
+        return self._search_with_checkpoint_fallback(search_query, limit=limit)
+
+    def _search_with_checkpoint_fallback(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Search raw segments with fallback to checkpoint summaries and metadata."""
+        query_terms = [t.lower() for t in re.findall(r"\b\w+\b", query) if len(t) > 1]
         scored_results: Dict[int, Dict[str, Any]] = {}
 
-        # Step 1: Search raw_segments via exact query and terms
-        raw_matches = self.db.search_raw_segments(trimmed_query, limit=limit * 2)
+        raw_matches = self.db.search_fts(query, limit=limit * 2)
         for match in raw_matches:
             seg_id = match["id"]
             content = match["content"]
-            score = self._compute_relevance(content, trimmed_query, query_terms)
+            score = self._compute_relevance(content, query, query_terms)
             scored_results[seg_id] = {
+                "id": seg_id,
                 "segment_id": seg_id,
                 "checkpoint_id": match["checkpoint_id"],
                 "content": content,
@@ -55,7 +127,6 @@ class RetrievalEngine:
                 "source": "raw_segment"
             }
 
-        # Step 2: Fallback or enrichment via Checkpoints (summaries, key prompts, files)
         if len(scored_results) < limit:
             all_checkpoints = self.db.get_all_checkpoints(limit=limit * 3)
             for cp in all_checkpoints:
@@ -64,32 +135,19 @@ class RetrievalEngine:
                 if not raw_segments:
                     continue
 
-                # Search within checkpoint summary
-                summary_text = cp.get("summary", "")
-                summary_score = self._compute_relevance(summary_text, trimmed_query, query_terms)
-
-                # Search within key prompts
+                summary_score = self._compute_relevance(cp.get("summary", ""), query, query_terms)
                 prompts = cp.get("key_prompts", [])
-                prompts_text = " ".join(
-                    f"{p.get('prompt', '')} {p.get('outcome', '')}" for p in prompts
-                )
-                prompts_score = self._compute_relevance(prompts_text, trimmed_query, query_terms)
+                prompts_text = " ".join(f"{p.get('prompt', '')} {p.get('outcome', '')}" for p in prompts)
+                prompts_score = self._compute_relevance(prompts_text, query, query_terms)
 
-                # Search within files metadata
-                files = cp.get("files_metadata", [])
-                files_text = " ".join(
-                    f"{f.get('filename', '')} {f.get('summary', '')}" for f in files
-                )
-                files_score = self._compute_relevance(files_text, trimmed_query, query_terms)
-
-                best_cp_score = max(summary_score, prompts_score, files_score)
+                best_cp_score = max(summary_score, prompts_score)
                 if best_cp_score > 0.15:
                     combined_content = "\n\n".join(raw_segments)
-                    # Use a synthetic ID or first segment ID
                     refs = cp.get("raw_segment_refs", [])
                     seg_id = refs[0] if refs else 0
                     if seg_id not in scored_results or best_cp_score > scored_results[seg_id]["relevance_score"]:
                         scored_results[seg_id] = {
+                            "id": seg_id,
                             "segment_id": seg_id,
                             "checkpoint_id": cp_id,
                             "content": combined_content,
@@ -106,18 +164,16 @@ class RetrievalEngine:
         return sorted_matches[:limit]
 
     def _compute_relevance(self, text: str, full_query: str, query_terms: List[str]) -> float:
-        """Compute relevance score (0.0 to 1.0) of text against query."""
+        """Compute basic text relevance score."""
         if not text:
             return 0.0
 
         lower_text = text.lower()
         score = 0.0
 
-        # Exact phrase match gives high boost
         if full_query.lower() in lower_text:
             score += 0.6
 
-        # Term overlap
         if query_terms:
             matched_terms = [t for t in query_terms if t in lower_text]
             term_ratio = len(matched_terms) / len(query_terms)
@@ -128,35 +184,45 @@ class RetrievalEngine:
     def rehydrate_segment(
         self,
         segment: str,
-        user_query: Optional[str] = None
+        user_query: Optional[str] = None,
+        segment_id: Optional[int] = None,
+        checkpoint_id: Optional[int] = None,
+        timestamp: Optional[str] = None,
+        relevance_score: Optional[float] = None,
+        format_style: str = "legacy"
     ) -> str:
         """
         Format a raw segment into a clean, structured context block for injection into active LLM context.
-
-        Args:
-            segment: The raw conversation content to inject.
-            user_query: Current query for context awareness.
-
-        Returns:
-            Formatted string ready for context window insertion.
+        
+        Supports both modern XML-enveloped format (<retrieved_context>) and legacy text tags.
         """
+        content = segment.strip()
+        ts_attr = f' timestamp="{timestamp}"' if timestamp else ""
+        seg_attr = f' segment_id="{segment_id}"' if segment_id is not None else ""
+        cp_attr = f' checkpoint_id="{checkpoint_id}"' if checkpoint_id is not None else ""
+        rel_attr = f' relevance="{relevance_score:.2f}"' if relevance_score is not None else ""
+
+        if format_style == "xml":
+            query_tag = f"  <query>{user_query.strip()}</query>\n" if user_query else ""
+            return (
+                f'<retrieved_context{seg_attr}{cp_attr}{ts_attr}{rel_attr}>\n'
+                f"{query_tag}"
+                f"  <content>\n{content}\n  </content>\n"
+                f"</retrieved_context>"
+            )
+
+        # Legacy bracketed format
         header = "[REHYDRATED CONVERSATION SEGMENT]"
         footer = "[END REHYDRATED SEGMENT]"
-
-        if user_query:
-            query_line = f"Context Query: {user_query.strip()}\n"
-        else:
-            query_line = ""
-
-        formatted = (
+        query_line = f"Context Query: {user_query.strip()}\n" if user_query else ""
+        return (
             f"{header}\n"
             f"{query_line}"
             f"---\n"
-            f"{segment.strip()}\n"
+            f"{content}\n"
             f"---\n"
             f"{footer}"
         )
-        return formatted
 
     def get_checkpoint_details(self, checkpoint_id: int) -> Optional[Dict[str, Any]]:
         """Get full details of a specific checkpoint along with all its raw segments."""
